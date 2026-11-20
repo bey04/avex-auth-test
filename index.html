@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AVEX Auth Test</title>
+<style>
+  body{margin:0;padding:16px;background:#0b0b0b;color:#f2f2f2;font:15px/1.5 system-ui,sans-serif;max-width:640px;margin-inline:auto}
+  h1{color:#d4af37;font-size:20px;margin:0 0 4px} h2{color:#d4af37;font-size:16px;margin:24px 0 8px}
+  p.s{color:#9a9a9a;margin:0 0 12px;font-size:13px}
+  button{background:#d4af37;color:#000;border:0;border-radius:8px;padding:10px 14px;margin:4px 4px 4px 0;font-size:14px;font-weight:600}
+  button:disabled{opacity:.4}
+  pre{background:#161616;border:1px solid #333;border-radius:8px;padding:10px;white-space:pre-wrap;word-break:break-word;font-size:12px;min-height:60px}
+</style>
+</head>
+<body>
+<h1>AVEX Auth Test</h1>
+<p class="s">Identity verification test only. No business data. The login token stays in memory and is never shown.</p>
+
+<h2>1. Connectivity check</h2>
+<button id="btnConn">Run connectivity check</button>
+
+<h2>2. Sign in</h2>
+<div id="gbtn"></div>
+<p class="s" id="signState">Not signed in.</p>
+
+<h2>3. Tests</h2>
+<button class="t" data-t="whoami" disabled>who am I</button>
+<button class="t" data-t="adminOnly" disabled>admin-only action</button>
+<button class="t" data-t="forged" disabled>forged role/email</button>
+<button class="t" data-t="tampered" disabled>tampered token</button>
+<button class="t" data-t="garbage" disabled>garbage token</button>
+<button class="t" data-t="first" disabled>first token (use after 65+ min)</button>
+
+<h2>Result log</h2>
+<pre id="log"></pre>
+<button id="btnClear">Clear log</button> <button id="btnOut" disabled>Sign out</button>
+
+<script>
+// ====== EDIT THESE TWO VALUES ======
+const GOOGLE_CLIENT_ID = '686990557839-llp80bdof1999o9nu9ktffkg8l4vle41.apps.googleusercontent.com';
+const ENDPOINT = 'https://script.google.com/macros/s/AKfycbzCmJHfIL57ip-YKavdsDn3LbWG9KefJDKpCUwjdllIsrlGZtGgoqze4MZ2zc-I-F39/exec';
+// ===================================
+
+let idToken = null, firstToken = null;
+const $ = id => document.getElementById(id);
+const log = s => { $('log').textContent = '[' + new Date().toISOString() + '] ' + s + '\n\n' + $('log').textContent; };
+const withTimeout = (ms) => { const c = new AbortController(); setTimeout(() => c.abort(), ms); return c.signal; };
+
+function loadGis() {
+  return new Promise((resolve, reject) => {
+    if (window.google && google.accounts && google.accounts.id) return resolve();
+    const s = document.createElement('script');
+    s.src = 'https://accounts.google.com/gsi/client'; s.async = true;
+    s.onload = () => resolve(); s.onerror = () => reject(new Error('script failed to load'));
+    document.head.appendChild(s);
+    setTimeout(() => reject(new Error('timeout 15s')), 15000);
+  });
+}
+
+$('btnConn').onclick = async () => {
+  const out = ['Time: ' + new Date().toString(), 'Page host: ' + location.origin, 'Browser: ' + navigator.userAgent];
+  let t = performance.now();
+  try { await loadGis(); out.push('PASS  Google sign-in script loaded (' + Math.round(performance.now() - t) + ' ms)'); }
+  catch (e) { out.push('FAIL  Google sign-in script: ' + e.message); }
+  t = performance.now();
+  try {
+    const r = await fetch(ENDPOINT, { signal: withTimeout(15000) });
+    const j = await r.json();
+    out.push((j.ok ? 'PASS' : 'FAIL') + '  Apps Script endpoint reachable (' + Math.round(performance.now() - t) + ' ms)');
+  } catch (e) { out.push('FAIL  Apps Script endpoint: ' + e.message); }
+  log(out.join('\n'));
+};
+
+function onCredential(resp) {
+  idToken = resp.credential; if (!firstToken) firstToken = idToken;
+  $('signState').textContent = 'Signed in. Token held in memory only.';
+  document.querySelectorAll('.t,#btnOut').forEach(b => b.disabled = false);
+  log('Signed in. Run a test below.');
+}
+
+loadGis().then(() => {
+  google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: onCredential, auto_select: false });
+  google.accounts.id.renderButton($('gbtn'), { theme: 'filled_black', size: 'large', text: 'signin_with' });
+}).catch(e => { $('signState').textContent = 'Google sign-in could not load: ' + e.message; });
+
+async function post(token, action, extra) {
+  const r = await fetch(ENDPOINT, {
+    method: 'POST', redirect: 'follow', signal: withTimeout(20000),
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },   // avoids CORS preflight
+    body: JSON.stringify(Object.assign({ idToken: token, action: action }, extra || {}))
+  });
+  return r.json();
+}
+const b64uDec = s => JSON.parse(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4)));
+const b64uEnc = o => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+document.querySelectorAll('.t').forEach(b => b.onclick = async () => {
+  const t = b.dataset.t; let label = t, res;
+  try {
+    if (t === 'whoami') res = await post(idToken, 'whoami');
+    else if (t === 'adminOnly') res = await post(idToken, 'adminOnly');
+    else if (t === 'forged') res = await post(idToken, 'forgedFieldsEcho', { role: 'ADMIN', email: 'someone.else@gmail.com' });
+    else if (t === 'tampered') {
+      const p = idToken.split('.'); const c = b64uDec(p[1]); c.email = 'someone.else@gmail.com'; p[1] = b64uEnc(c);
+      res = await post(p.join('.'), 'whoami');
+    } else if (t === 'garbage') res = await post('not.a.token', 'whoami');
+    else if (t === 'first') res = await post(firstToken, 'whoami');
+  } catch (e) { res = { networkError: e.message }; }
+  log('TEST ' + label + '\n' + JSON.stringify(res, null, 2));
+});
+
+$('btnClear').onclick = () => { $('log').textContent = ''; };
+$('btnOut').onclick = () => {
+  if (window.google && google.accounts) google.accounts.id.disableAutoSelect();
+  idToken = null; firstToken = null; $('signState').textContent = 'Signed out.';
+  document.querySelectorAll('.t,#btnOut').forEach(b => b.disabled = true);
+};
+</script>
+</body>
+</html>
